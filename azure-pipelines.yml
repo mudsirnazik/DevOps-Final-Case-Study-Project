@@ -1,0 +1,143 @@
+# azure-pipelines.yml
+
+trigger:
+  branches:
+    include:
+      - main
+      - feature/*
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  imageRepository: 'pyapp'
+  dockerRegistryServiceConnection: 'acr-service'
+  kubernetesServiceConnection: 'aks-conn'
+  containerRegistry: 'myacr.azurecr.io'
+  tag: '$(Build.BuildId)'
+
+####################################################
+# BUILD STAGE
+####################################################
+
+stages:
+
+- stage: Build
+  displayName: "Build Docker Image"
+
+  jobs:
+  - job: BuildDocker
+    displayName: "Build and Push Docker Image"
+
+    steps:
+
+    - checkout: self
+
+    - task: Docker@2
+      displayName: Build and Push Docker Image
+      inputs:
+        command: buildAndPush
+        repository: $(imageRepository)
+        dockerfile: Dockerfile
+        containerRegistry: $(dockerRegistryServiceConnection)
+        tags: |
+          $(tag)
+
+####################################################
+# TEST STAGE
+####################################################
+
+- stage: Test
+  displayName: "Run Automated Tests"
+
+  dependsOn: Build
+
+  jobs:
+
+  - job: TestPython
+
+    steps:
+
+    - script: |
+        docker pull $(containerRegistry)/$(imageRepository):$(tag)
+
+        docker run --rm \
+        $(containerRegistry)/$(imageRepository):$(tag) \
+        pytest tests/
+      displayName: Run PyTest
+
+####################################################
+# PROVISION STAGE
+####################################################
+
+- stage: Provision
+  displayName: "Provision Azure Infrastructure"
+
+  dependsOn: Test
+
+  jobs:
+
+  - job: Terraform
+
+    steps:
+
+    - checkout: self
+
+    - script: |
+        cd terraform
+
+        terraform init
+
+        terraform validate
+
+        terraform plan
+
+        terraform apply -auto-approve
+      displayName: Terraform Deployment
+
+####################################################
+# DEPLOY STAGE
+####################################################
+
+- stage: Deploy
+  displayName: "Deploy to AKS"
+
+  dependsOn: Provision
+
+  jobs:
+
+  - deployment: DeployAKS
+
+    environment: production
+
+    strategy:
+
+      runOnce:
+
+        deploy:
+
+          steps:
+
+          - checkout: self
+
+          - task: KubernetesManifest@0
+
+            displayName: Deploy Application
+
+            inputs:
+
+              action: deploy
+
+              kubernetesServiceConnection: $(kubernetesServiceConnection)
+
+              manifests: |
+                kubernetes/deployment.yaml
+                kubernetes/service.yaml
+
+              containers: |
+                $(containerRegistry)/$(imageRepository):$(tag)
