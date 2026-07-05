@@ -1,143 +1,63 @@
-# azure-pipelines.yml
-
 trigger:
-  branches:
-    include:
-      - main
-      - feature/*
-
-pr:
-  branches:
-    include:
-      - main
+  - main
 
 pool:
   vmImage: 'ubuntu-latest'
 
 variables:
-  imageRepository: 'pyapp'
-  dockerRegistryServiceConnection: 'acr-service'
-  kubernetesServiceConnection: 'aks-conn'
-  containerRegistry: 'myacr.azurecr.io'
-  tag: '$(Build.BuildId)'
-
-####################################################
-# BUILD STAGE
-####################################################
+  EC2_IP: '3.26.213.217'   # replace with your EC2 public IP
+  EC2_USER: 'ubuntu'
 
 stages:
 
+# ===================== BUILD STAGE =====================
 - stage: Build
-  displayName: "Build Docker Image"
-
+  displayName: 'Build Stage'
   jobs:
-  - job: BuildDocker
-    displayName: "Build and Push Docker Image"
-
+  - job: BuildJob
     steps:
+    - script: echo "Build Stage"
+      displayName: 'Echo Build Stage'
 
-    - checkout: self
 
-    - task: Docker@2
-      displayName: Build and Push Docker Image
-      inputs:
-        command: buildAndPush
-        repository: $(imageRepository)
-        dockerfile: Dockerfile
-        containerRegistry: $(dockerRegistryServiceConnection)
-        tags: |
-          $(tag)
-
-####################################################
-# TEST STAGE
-####################################################
-
+# ===================== TEST STAGE =====================
 - stage: Test
-  displayName: "Run Automated Tests"
-
+  displayName: 'Test Stage'
   dependsOn: Build
-
   jobs:
-
-  - job: TestPython
-
+  - job: TestJob
     steps:
+    - script: echo "Test Stage"
+      displayName: 'Echo Test Stage'
 
-    - script: |
-        docker pull $(containerRegistry)/$(imageRepository):$(tag)
 
-        docker run --rm \
-        $(containerRegistry)/$(imageRepository):$(tag) \
-        pytest tests/
-      displayName: Run PyTest
-
-####################################################
-# PROVISION STAGE
-####################################################
-
-- stage: Provision
-  displayName: "Provision Azure Infrastructure"
-
-  dependsOn: Test
-
-  jobs:
-
-  - job: Terraform
-
-    steps:
-
-    - checkout: self
-
-    - script: |
-        cd terraform
-
-        terraform init
-
-        terraform validate
-
-        terraform plan
-
-        terraform apply -auto-approve
-      displayName: Terraform Deployment
-
-####################################################
-# DEPLOY STAGE
-####################################################
-
+# ===================== DEPLOY STAGE =====================
 - stage: Deploy
-  displayName: "Deploy to AKS"
-
-  dependsOn: Provision
-
+  displayName: 'Deploy Stage'
+  dependsOn: Test
   jobs:
+  - job: DeployJob
+    steps:
 
-  - deployment: DeployAKS
+    - task: DownloadSecureFile@1
+      name: sshKey
+      inputs:
+        secureFile: 'Data Analytics.pem'
 
-    environment: production
+    - script: |
+        chmod 600 $(sshKey.secureFilePath)
 
-    strategy:
+        sed -i 's/__EC2_IP__/$(EC2_IP)/g' index.html
 
-      runOnce:
+        scp -o StrictHostKeyChecking=no \
+          -i $(sshKey.secureFilePath) \
+          index.html \
+          $(EC2_USER)@$(EC2_IP):/var/www/html/index.html
 
-        deploy:
+        ssh -o StrictHostKeyChecking=no \
+          -i $(sshKey.secureFilePath) \
+          $(EC2_USER)@$(EC2_IP) \
+          "sudo systemctl restart httpd"
 
-          steps:
-
-          - checkout: self
-
-          - task: KubernetesManifest@0
-
-            displayName: Deploy Application
-
-            inputs:
-
-              action: deploy
-
-              kubernetesServiceConnection: $(kubernetesServiceConnection)
-
-              manifests: |
-                kubernetes/deployment.yaml
-                kubernetes/service.yaml
-
-              containers: |
-                $(containerRegistry)/$(imageRepository):$(tag)
+        echo "Deploy Stage — index.html deployed and Apache restarted"
+      displayName: 'Deploy to EC2 via SSH'
